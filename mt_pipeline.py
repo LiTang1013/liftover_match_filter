@@ -1677,16 +1677,26 @@ def build_trna_position_index(species_key: str, trnascan_out: str, trnascan_ss: 
     log(f"Wrote tRNA position index: {output_tsv}")
 
 
-def load_trna_position_index(path: str | Path, chrom_norm: str = "none") -> Dict[Tuple[str, int], List[Dict[str, str]]]:
+def load_trna_position_index(
+    path: str | Path,
+    chrom_norm: str = "none",
+    ignore_chrom: bool = False,
+) -> Dict[Tuple[str, int], List[Dict[str, str]]]:
     idx: Dict[Tuple[str, int], List[Dict[str, str]]] = defaultdict(list)
     with open_text(path, "rt") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         for row in reader:
             chrom = normalize_chrom(row.get("chrom"), chrom_norm)
             pos = parse_optional_int(row.get("pos"))
-            if chrom is None or pos is None:
+            if pos is None:
                 continue
-            idx[(chrom, pos)].append(row)
+            if ignore_chrom:
+                key = ("*", pos)
+            else:
+                if chrom is None:
+                    continue
+                key = (chrom, pos)
+            idx[key].append(row)
     for k in idx:
         idx[k].sort(key=lambda r: r.get("trna_id", ""))
     return idx
@@ -1718,6 +1728,9 @@ TRNA_INFO_LINES = [
     '##INFO=<ID=MTTRNA_S_PAIR_LIFTED_HPOS,Number=1,Type=String,Description="Species/source paired genomic position lifted to human genomic position through alignment posmap">',
     '##INFO=<ID=MTTRNA_PAIR_POS_MATCH,Number=1,Type=String,Description="yes/no/NA, whether lifted source paired position equals human expected paired position">',
     '##INFO=<ID=MTTRNA_STRICT_MATCH,Number=1,Type=String,Description="yes/no, strict tRNA match: loop requires region+element match; stem requires region+element+pair_state+pair_pos match">',
+    '##INFO=<ID=MTTRNA_S_COORD_SPACE,Number=1,Type=String,Description="species tRNA lookup coordinate space: original or rotated">',
+    '##INFO=<ID=MTTRNA_S_LOOKUP_CHROM,Number=1,Type=String,Description="species tRNA lookup chrom key (or * when chrom is ignored)">',
+    '##INFO=<ID=MTTRNA_S_LOOKUP_POS,Number=1,Type=String,Description="species tRNA lookup position key">',
 ]
 
 
@@ -1751,6 +1764,9 @@ def annotate_trna_record(
     human_idx: Dict[Tuple[str, int], List[Dict[str, str]]],
     species_chrom_norm: str,
     human_chrom_norm: str,
+    species_trna_coord_space: str,
+    species_lookup_ignore_chrom: bool,
+    human_lookup_ignore_chrom: bool,
     map_dict: Dict[int, Tuple[int, str, str, str]],
     p_init: int,
     p_len: int,
@@ -1759,15 +1775,23 @@ def annotate_trna_record(
 ) -> Dict[str, object]:
     info = parse_info(parts[7])
     sp_chrom = normalize_chrom(info.get("MTLIFT_ORIG_CHROM"), species_chrom_norm)
-    sp_pos = parse_optional_int(info.get("MTLIFT_ORIG_POS"))
+    coord_space = str(species_trna_coord_space or "original").strip().lower()
+    if coord_space not in {"original", "rotated"}:
+        coord_space = "original"
+    sp_pos = parse_optional_int(info.get("MTLIFT_ORIG_ROT_POS")) if coord_space == "rotated" else parse_optional_int(info.get("MTLIFT_ORIG_POS"))
     hu_chrom = normalize_chrom(parts[0], human_chrom_norm)
     hu_pos = int(parts[1])
     ann: Dict[str, object] = {}
-    if sp_chrom is None or sp_pos is None:
+    sp_lookup_chrom = "*" if species_lookup_ignore_chrom else sp_chrom
+    ann["MTTRNA_S_COORD_SPACE"] = coord_space
+    ann["MTTRNA_S_LOOKUP_CHROM"] = sp_lookup_chrom if sp_lookup_chrom is not None else NA
+    ann["MTTRNA_S_LOOKUP_POS"] = sp_pos if sp_pos is not None else NA
+    if sp_lookup_chrom is None or sp_pos is None:
         ann["MTTRNA_STATUS"] = "MISSING_SPECIES_COORD"
         return ann
-    sp_rows = species_idx.get((sp_chrom, sp_pos), [])
-    hu_rows = human_idx.get((hu_chrom, hu_pos), [])
+    sp_rows = species_idx.get((sp_lookup_chrom, sp_pos), [])
+    hu_lookup_chrom = "*" if human_lookup_ignore_chrom else hu_chrom
+    hu_rows = human_idx.get((hu_lookup_chrom, hu_pos), [])
     sp = first_row(sp_rows)
     hu = first_row(hu_rows)
     if sp is None and hu is None:
@@ -1808,7 +1832,7 @@ def annotate_trna_record(
     sp_pair_pos = parse_optional_int(g(sp, "paired_genomic_pos"))
     hu_pair_pos = parse_optional_int(g(hu, "paired_genomic_pos"))
     if sp_pair_pos is not None:
-        sp_pair_rot = rotate_pos(sp_pair_pos, p_init, p_len)
+        sp_pair_rot = sp_pair_pos if coord_space == "rotated" else rotate_pos(sp_pair_pos, p_init, p_len)
         hit = map_dict.get(sp_pair_rot)
         if hit is not None:
             h_pair_rot, _usable, _qref, _href = hit
@@ -1833,6 +1857,9 @@ def annotate_trna_vcf_file(
     human_offset: int,
     species_chrom_norm: str,
     human_chrom_norm: str,
+    species_trna_coord_space: str,
+    species_lookup_ignore_chrom: bool,
+    human_lookup_ignore_chrom: bool,
     summary_path: Optional[str] = None,
 ) -> Counter:
     if sample not in sample_to_ref:
@@ -1841,8 +1868,8 @@ def annotate_trna_vcf_file(
     if rotate_key not in ref_rotate_info:
         die(f"rotate key not found in rotate_pos_file: {rotate_key}")
     p_len, p_init = ref_rotate_info[rotate_key]
-    species_idx = load_trna_position_index(species_index_path, chrom_norm=species_chrom_norm)
-    human_idx = load_trna_position_index(human_index_path, chrom_norm=human_chrom_norm)
+    species_idx = load_trna_position_index(species_index_path, chrom_norm=species_chrom_norm, ignore_chrom=species_lookup_ignore_chrom)
+    human_idx = load_trna_position_index(human_index_path, chrom_norm=human_chrom_norm, ignore_chrom=human_lookup_ignore_chrom)
     map_dict = build_map_dict(posmap_path)
     stats = Counter()
     with open_text(in_vcf, "rt") as fin, open_text(out_vcf, "wt") as fout:
@@ -1866,7 +1893,7 @@ def annotate_trna_vcf_file(
             if len(parts) < 8:
                 stats["malformed"] += 1
                 continue
-            ann = annotate_trna_record(parts, species_idx, human_idx, species_chrom_norm, human_chrom_norm, map_dict, p_init, p_len, human_len, human_offset)
+            ann = annotate_trna_record(parts, species_idx, human_idx, species_chrom_norm, human_chrom_norm, species_trna_coord_space, species_lookup_ignore_chrom, human_lookup_ignore_chrom, map_dict, p_init, p_len, human_len, human_offset)
             add_info_to_parts(parts, ann)
             status = str(ann.get("MTTRNA_STATUS", "UNKNOWN"))
             stats[f"status_{status}"] += 1
@@ -2239,7 +2266,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.cmd == "annotate-trna":
         dirs = make_outdirs(cfg)
         sp_idx, hu_idx = ensure_trna_indexes(cfg, args.sample, dirs)
-        annotate_trna_vcf_file(args.input, args.output, sp_idx, hu_idx, str(dirs["maps"] / f"{args.sample}.posmap.tsv.gz"), args.sample, load_sample_ref_map(cfg.path_get("sample_ref_file")), load_rotate_info(cfg.path_get("rotate_pos_file")), cfg.setting_int("human_len", 16569), cfg.setting_int("human_restore_offset", 1325), cfg.setting("species_vcf_chrom_norm", cfg.setting("species_trna_chrom_norm", "none")), cfg.setting("human_vcf_chrom_norm", cfg.setting("human_trna_chrom_norm", "none")))
+        annotate_trna_vcf_file(args.input, args.output, sp_idx, hu_idx, str(dirs["maps"] / f"{args.sample}.posmap.tsv.gz"), args.sample, load_sample_ref_map(cfg.path_get("sample_ref_file")), load_rotate_info(cfg.path_get("rotate_pos_file")), cfg.setting_int("human_len", 16569), cfg.setting_int("human_restore_offset", 1325), cfg.setting("species_vcf_chrom_norm", cfg.setting("species_trna_chrom_norm", "none")), cfg.setting("human_vcf_chrom_norm", cfg.setting("human_trna_chrom_norm", "none")), cfg.setting("species_trna_coord_space", "original"), cfg.setting_bool("species_trna_lookup_ignore_chrom", False), cfg.setting_bool("human_trna_lookup_ignore_chrom", False))
         return 0
     if args.cmd == "filter-vcf":
         mode = args.mode if args.mode is not None else cfg.setting("final_filter_mode", "none")

@@ -197,4 +197,15 @@ region_policy
 
 The current liftover stage is SNV-oriented because it harmonizes REF/ALT to the human reference and recodes genotypes when REF/ALT are swapped. Non-SNV or multi-allelic records are written to the `.dropped.vcf` output.
 
-The tRNA paired-position check uses the same alignment-derived `posmap.tsv.gz` used by liftover. The source paired genomic position is rotated, lifted through the map, restored to unrotated human coordinates, and compared with the human tRNA paired genomic position.
+The tRNA paired-position check uses the same alignment-derived `posmap.tsv.gz` used by liftover. When `species_trna_coord_space=original`, source paired genomic positions are rotated before liftover; when `species_trna_coord_space=rotated`, paired positions are used as-is to avoid double rotation.
+
+For rotated species tRNA indexes (for example `chrom=Allenopithecus_nigroviridis`, `pos=<rotated position>`), set:
+
+```ini
+[settings]
+species_trna_coord_space = rotated
+species_trna_lookup_ignore_chrom = 1
+human_trna_lookup_ignore_chrom = 0
+```
+
+`species_trna_lookup_ignore_chrom=1` makes species tRNA lookup key on position only, and `species_trna_coord_space=rotated` switches species lookup to `INFO/MTLIFT_ORIG_ROT_POS`.
