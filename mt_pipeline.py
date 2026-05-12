@@ -1916,9 +1916,20 @@ def ensure_trna_indexes(cfg: PipeConfig, sample: str, dirs: Dict[str, Path]) -> 
     human_out = cfg.path_get("human_trnascan_out", "")
     human_ss = cfg.path_get("human_trnascan_ss", "")
     human_norm = cfg.setting("human_trna_chrom_norm", "none")
+    if not human_out or not human_ss:
+        prefix = cfg.path_get("human_trnascan_prefix", "{outdir}/trnascan/human")
+        human_out = f"{prefix}.trnascan.out"
+        human_ss = f"{prefix}.trnascan.ss"
     if not Path(human_index).exists():
-        if not human_out or not human_ss:
-            die("human_trna_index is missing and human_trnascan_out/human_trnascan_ss are not configured")
+        if not Path(human_out).exists() or not Path(human_ss).exists():
+            if cfg.setting_bool("run_trnascan_if_missing", False):
+                human_fasta = cfg.path_get("human_trna_fasta", cfg.path_get("ref_human_fasta"))
+                prefix = cfg.path_get("human_trnascan_prefix", "{outdir}/trnascan/human")
+                run_trnascan(human_fasta, prefix, cfg.setting("trnascan_mode", "mito_mammal"), cfg.setting_int("trnascan_threads", 4), cfg.setting("trnascan_bin", "tRNAscan-SE"), cfg.setting("trnascan_extra_args", ""))
+                human_out = f"{prefix}.trnascan.out"
+                human_ss = f"{prefix}.trnascan.ss"
+            else:
+                die(f"Human tRNAscan files missing: {human_out}, {human_ss}. Set run_trnascan_if_missing=1 or provide paths.")
         build_trna_position_index("human", human_out, human_ss, human_index, chrom_norm=human_norm)
     # Species index
     sp_out, sp_ss, sp_index = species_trna_paths(cfg, sample, dirs)
