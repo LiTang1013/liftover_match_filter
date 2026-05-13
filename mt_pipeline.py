@@ -2013,7 +2013,7 @@ def trna_stage(cfg: PipeConfig, sample: str, input_vcfs: List[str], posmap_path:
         else:
             out_vcf = str(out_dir / f"{stem}.trna.vcf")
         log(f"tRNA annotate: {in_vcf} -> {out_vcf}")
-        annotate_trna_vcf_file(in_vcf, out_vcf, species_index, human_index, posmap_path, sample, sample_to_ref, ref_rotate_info, human_len, human_offset, sp_norm, hu_norm, summary_path)
+        annotate_trna_vcf_file(in_vcf, out_vcf, species_index, human_index, posmap_path, sample, sample_to_ref, ref_rotate_info, human_len, human_offset, sp_norm, hu_norm, cfg.setting("species_trna_coord_space", "original"), cfg.setting_bool("species_trna_lookup_ignore_chrom", False), cfg.setting_bool("human_trna_lookup_ignore_chrom", False), summary_path)
         outputs.append(out_vcf)
     return outputs
 
