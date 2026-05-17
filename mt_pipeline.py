@@ -1789,6 +1789,7 @@ def annotate_trna_record(
     human_offset: int,
 ) -> Dict[str, object]:
     info = parse_info(parts[7])
+    alt_base = parts[4].split(",")[0].upper()
     sp_chrom = normalize_chrom(info.get("MTLIFT_ORIG_CHROM"), species_chrom_norm)
     coord_space = str(species_trna_coord_space or "original").strip().lower()
     if coord_space not in {"original", "rotated"}:
