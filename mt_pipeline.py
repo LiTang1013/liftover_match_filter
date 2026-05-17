@@ -1170,6 +1170,7 @@ def codon_match_for_record(
     strict_phase_match: bool,
 ) -> Dict[str, object]:
     info = parse_info(parts[7])
+    alt_base = parts[4].split(",")[0].upper()
     orig_pos = parse_optional_int(info.get("MTLIFT_ORIG_POS"))
     human_pos = parse_optional_int(info.get("MTLIFT_HUMAN_POS")) or int(parts[1])
     orig_alt = info.get("MTLIFT_ORIG_ALT", parts[4]).split(",")[0].upper()
@@ -1623,6 +1624,14 @@ def binary_pair_state(ptype: str) -> str:
     return "WC" if ptype == "WC" else "non_WC"
 
 
+def pair_effect(ref_pair_type: str, alt_pair_type: str) -> str:
+    if ref_pair_type == NA or alt_pair_type == NA:
+        return NA
+    if ref_pair_type == alt_pair_type:
+        return "unchanged"
+    return f"{ref_pair_type}_to_{alt_pair_type}"
+
+
 def trna_index_fields() -> List[str]:
     return [
         "species_key", "chrom", "pos", "trna_id", "trna_begin", "trna_end", "strand", "aa", "anticodon", "score",
@@ -1727,6 +1736,12 @@ TRNA_INFO_LINES = [
     '##INFO=<ID=MTTRNA_H_PAIR_POS,Number=1,Type=String,Description="Human expected paired genomic position">',
     '##INFO=<ID=MTTRNA_S_PAIR_LIFTED_HPOS,Number=1,Type=String,Description="Species/source paired genomic position lifted to human genomic position through alignment posmap">',
     '##INFO=<ID=MTTRNA_PAIR_POS_MATCH,Number=1,Type=String,Description="yes/no/NA, whether lifted source paired position equals human expected paired position">',
+    '##INFO=<ID=MTTRNA_H_ALT_PAIR_TYPE,Number=1,Type=String,Description="Human ALT-aware pair type at lifted site (stem variants only): WC, GU_wobble, non_WC, or NA">',
+    '##INFO=<ID=MTTRNA_S_ALT_PAIR_TYPE,Number=1,Type=String,Description="Species/source ALT-aware pair type at original site (stem variants only): WC, GU_wobble, non_WC, or NA">',
+    '##INFO=<ID=MTTRNA_H_ALT_EFFECT,Number=1,Type=String,Description="Human ALT effect on pair type (stem variants only): unchanged or <REF>_to_<ALT>">',
+    '##INFO=<ID=MTTRNA_S_ALT_EFFECT,Number=1,Type=String,Description="Species/source ALT effect on pair type (stem variants only): unchanged or <REF>_to_<ALT>">',
+    '##INFO=<ID=MTTRNA_ALLELE_EFFECT_MATCH,Number=1,Type=String,Description="yes/no/NA, whether source and human ALT effects on pair type match">',
+    '##INFO=<ID=MTTRNA_COMPENSATED,Number=1,Type=String,Description="yes/no/NA, whether ALT pairing is compensated between source and human (both ALT pair types are pairing: WC or GU_wobble)">',
     '##INFO=<ID=MTTRNA_STRICT_MATCH,Number=1,Type=String,Description="yes/no, strict tRNA match: loop requires region+element match; stem requires region+element+pair_state+pair_pos match">',
     '##INFO=<ID=MTTRNA_S_COORD_SPACE,Number=1,Type=String,Description="species tRNA lookup coordinate space: original or rotated">',
     '##INFO=<ID=MTTRNA_S_LOOKUP_CHROM,Number=1,Type=String,Description="species tRNA lookup chrom key (or * when chrom is ignored)">',
@@ -1774,6 +1789,7 @@ def annotate_trna_record(
     human_offset: int,
 ) -> Dict[str, object]:
     info = parse_info(parts[7])
+    alt_base = parts[4].split(",")[0].upper()
     sp_chrom = normalize_chrom(info.get("MTLIFT_ORIG_CHROM"), species_chrom_norm)
     coord_space = str(species_trna_coord_space or "original").strip().lower()
     if coord_space not in {"original", "rotated"}:
@@ -1828,6 +1844,12 @@ def annotate_trna_record(
         "MTTRNA_H_PAIR_POS": g(hu, "paired_genomic_pos"),
         "MTTRNA_S_PAIR_LIFTED_HPOS": NA,
         "MTTRNA_PAIR_POS_MATCH": NA,
+        "MTTRNA_H_ALT_PAIR_TYPE": NA,
+        "MTTRNA_S_ALT_PAIR_TYPE": NA,
+        "MTTRNA_H_ALT_EFFECT": NA,
+        "MTTRNA_S_ALT_EFFECT": NA,
+        "MTTRNA_ALLELE_EFFECT_MATCH": NA,
+        "MTTRNA_COMPENSATED": NA,
     })
     sp_pair_pos = parse_optional_int(g(sp, "paired_genomic_pos"))
     hu_pair_pos = parse_optional_int(g(hu, "paired_genomic_pos"))
@@ -1840,6 +1862,21 @@ def annotate_trna_record(
             ann["MTTRNA_S_PAIR_LIFTED_HPOS"] = h_pair_final
             if hu_pair_pos is not None:
                 ann["MTTRNA_PAIR_POS_MATCH"] = "yes" if h_pair_final == hu_pair_pos else "no"
+    if g(sp, "struct_class") == "stem" and g(hu, "struct_class") == "stem":
+        sp_paired_base = g(sp, "paired_base")
+        hu_paired_base = g(hu, "paired_base")
+        sp_alt_pair_type = pair_type(alt_base, sp_paired_base)
+        hu_alt_pair_type = pair_type(alt_base, hu_paired_base)
+        ann["MTTRNA_S_ALT_PAIR_TYPE"] = sp_alt_pair_type
+        ann["MTTRNA_H_ALT_PAIR_TYPE"] = hu_alt_pair_type
+        ann["MTTRNA_S_ALT_EFFECT"] = pair_effect(g(sp, "pair_type"), sp_alt_pair_type)
+        ann["MTTRNA_H_ALT_EFFECT"] = pair_effect(g(hu, "pair_type"), hu_alt_pair_type)
+        ann["MTTRNA_ALLELE_EFFECT_MATCH"] = compare_values(ann["MTTRNA_S_ALT_EFFECT"], ann["MTTRNA_H_ALT_EFFECT"])
+        paired_types = {"WC", "GU_wobble"}
+        if ann["MTTRNA_S_ALT_PAIR_TYPE"] in paired_types and ann["MTTRNA_H_ALT_PAIR_TYPE"] in paired_types:
+            ann["MTTRNA_COMPENSATED"] = "yes"
+        else:
+            ann["MTTRNA_COMPENSATED"] = "no"
     ann["MTTRNA_STRICT_MATCH"] = trna_strict_match(ann)
     return ann
 
@@ -2039,7 +2076,11 @@ def record_passes_filter(info: Dict[str, str], mode: str) -> bool:
         trna_status = str(info.get("MTTRNA_STATUS", NA))
         is_trna_variant = trna_status in {"OK", "NO_SPECIES_TRNA", "NO_HUMAN_TRNA"}
         if is_trna_variant:
-            return info.get("MTTRNA_STRICT_MATCH") == "yes"
+            return (
+                info.get("MTTRNA_REGION_MATCH") == "yes" and
+                info.get("MTTRNA_ALLELE_EFFECT_MATCH") == "yes" and
+                info.get("MTTRNA_COMPENSATED") == "yes"
+            )
         return True
     if mode == "trna_loose_match":
         return (
