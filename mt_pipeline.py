@@ -2091,7 +2091,15 @@ def record_passes_filter(info: Dict[str, str], mode: str) -> bool:
     if mode == "trna_strict_match":
         return info.get("MTTRNA_STRICT_MATCH") == "yes"
     if mode == "codon_pass":
-        return info.get("MTCODON_STATUS") == "PASS"
+        # Remove only variants that failed codon matching.
+        # Keep coding PASS, noncoding SKIPPED_NONCODING, and records without codon annotation.
+        bad_codon_status = {
+            "MISMATCH",
+            "GENE_MISMATCH",
+            "PHASE_MISMATCH",
+            "NO_HUMAN_CODON",
+        }
+        return info.get("MTCODON_STATUS") not in bad_codon_status
     if mode == "trna_region_match":
         return info.get("MTTRNA_REGION_MATCH") == "yes"
     if mode == "trna_pair_state_match":
