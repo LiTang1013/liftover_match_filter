@@ -2029,6 +2029,135 @@ def ensure_trna_indexes(cfg: PipeConfig, sample: str, dirs: Dict[str, Path]) -> 
     return sp_index, human_index
 
 
+
+
+def build_trna_gene_liftover_qc(
+    sample: str,
+    species_out: str,
+    species_ss: str,
+    human_out: str,
+    human_ss: str,
+    posmap_path: str,
+    sample_to_ref: Dict[str, str],
+    ref_rotate_info: Dict[str, Tuple[int, int]],
+    human_len: int,
+    human_offset: int,
+    species_coord_space: str,
+    species_chrom_norm: str,
+    human_chrom_norm: str,
+    output_tsv: str,
+) -> Counter:
+    if sample not in sample_to_ref:
+        die(f"sample={sample} not found in sample_ref_file")
+    rotate_key = sample_to_ref[sample]
+    if rotate_key not in ref_rotate_info:
+        die(f"rotate key not found in rotate_pos_file: {rotate_key}")
+    p_len, p_init = ref_rotate_info[rotate_key]
+
+    species_records = merge_trnas(species_out, species_ss, chrom_norm=species_chrom_norm)
+    human_records = merge_trnas(human_out, human_ss, chrom_norm=human_chrom_norm)
+    human_list = list(human_records.values())
+    map_dict = build_map_dict(posmap_path)
+
+    fields = [
+        "sample", "species_trna_id", "species_chrom", "species_trna_start", "species_trna_end", "species_trna_interval", "species_trna_orientation", "species_isotype", "species_anticodon",
+        "mapped_human_interval_start", "mapped_human_interval_end", "mapped_human_interval_span", "mapped_points", "mapped_points_in_best_human_gene",
+        "best_human_trna_id", "best_human_trna_start", "best_human_trna_end", "best_human_trna_interval", "best_human_trna_orientation", "best_human_isotype", "best_human_anticodon",
+        "interval_overlap_bp", "interval_overlap_ratio", "orientation_match", "isotype_match", "anticodon_match", "lift_to_human_trna_interval_pass",
+    ]
+
+    def _interval_text(start: int, end: int) -> str:
+        return f"{start}-{end}"
+
+    rows: List[Dict[str, object]] = []
+    stats = Counter(total_species_trna=len(species_records))
+
+    for rec in sorted(species_records.values(), key=lambda r: (str(r.chrom), r.start, r.end, str(r.trna_id))):
+        step = 1 if rec.begin_raw <= rec.end_raw else -1
+        mapped_human_pos: List[int] = []
+        for p0 in range(rec.begin_raw, rec.end_raw + step, step):
+            p_rot = p0 if species_coord_space == "rotated" else rotate_pos(p0, p_init, p_len)
+            hit = map_dict.get(p_rot)
+            if hit is None:
+                continue
+            h_rot, _usable, _qref, _href = hit
+            mapped_human_pos.append(restore_human_pos(h_rot, human_offset, human_len))
+
+        overlap_counts: Dict[str, int] = {}
+        for hp in mapped_human_pos:
+            for hrec in human_list:
+                if hrec.contains(hp):
+                    overlap_counts[hrec.trna_id] = overlap_counts.get(hrec.trna_id, 0) + 1
+
+        best_hrec = None
+        best_count = 0
+        if overlap_counts:
+            best_id = sorted(overlap_counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+            best_hrec = human_records.get(best_id)
+            best_count = overlap_counts[best_id]
+
+        mapped_start = min(mapped_human_pos) if mapped_human_pos else NA
+        mapped_end = max(mapped_human_pos) if mapped_human_pos else NA
+        mapped_span = (mapped_end - mapped_start + 1) if mapped_human_pos else NA
+
+        interval_overlap_bp = 0
+        interval_overlap_ratio = NA
+        orientation_match = NA
+        isotype_match = NA
+        anticodon_match = NA
+        pass_flag = "no"
+
+        if best_hrec is not None and mapped_human_pos:
+            lo = int(mapped_start)
+            hi = int(mapped_end)
+            interval_overlap_bp = max(0, min(hi, best_hrec.end) - max(lo, best_hrec.start) + 1)
+            interval_overlap_ratio = f"{interval_overlap_bp / (hi - lo + 1):.6f}" if hi >= lo else NA
+            orientation_match = "yes" if rec.strand == best_hrec.strand else "no"
+            isotype_match = "yes" if rec.aa == best_hrec.aa else "no"
+            anticodon_match = "yes" if rec.anticodon == best_hrec.anticodon else "no"
+            if interval_overlap_bp > 0 and orientation_match == "yes" and isotype_match == "yes":
+                pass_flag = "yes"
+
+        row = {
+            "sample": sample,
+            "species_trna_id": rec.trna_id,
+            "species_chrom": rec.chrom,
+            "species_trna_start": rec.start,
+            "species_trna_end": rec.end,
+            "species_trna_interval": _interval_text(rec.start, rec.end),
+            "species_trna_orientation": rec.strand,
+            "species_isotype": rec.aa,
+            "species_anticodon": rec.anticodon,
+            "mapped_human_interval_start": mapped_start,
+            "mapped_human_interval_end": mapped_end,
+            "mapped_human_interval_span": mapped_span,
+            "mapped_points": len(mapped_human_pos),
+            "mapped_points_in_best_human_gene": best_count,
+            "best_human_trna_id": best_hrec.trna_id if best_hrec else NA,
+            "best_human_trna_start": best_hrec.start if best_hrec else NA,
+            "best_human_trna_end": best_hrec.end if best_hrec else NA,
+            "best_human_trna_interval": _interval_text(best_hrec.start, best_hrec.end) if best_hrec else NA,
+            "best_human_trna_orientation": best_hrec.strand if best_hrec else NA,
+            "best_human_isotype": best_hrec.aa if best_hrec else NA,
+            "best_human_anticodon": best_hrec.anticodon if best_hrec else NA,
+            "interval_overlap_bp": interval_overlap_bp,
+            "interval_overlap_ratio": interval_overlap_ratio,
+            "orientation_match": orientation_match,
+            "isotype_match": isotype_match,
+            "anticodon_match": anticodon_match,
+            "lift_to_human_trna_interval_pass": pass_flag,
+        }
+        rows.append(row)
+        stats[f"pass_{pass_flag}"] += 1
+
+    with open_text(output_tsv, "wt") as out:
+        w = csv.DictWriter(out, fieldnames=fields, delimiter="\t", lineterminator="\n")
+        w.writeheader()
+        for row in rows:
+            w.writerow(row)
+    log(f"Wrote tRNA gene liftover QC: {output_tsv}")
+    return stats
+
 def trna_stage(cfg: PipeConfig, sample: str, input_vcfs: List[str], posmap_path: str, summary_path: str, dirs: Dict[str, Path]) -> List[str]:
     species_index, human_index = ensure_trna_indexes(cfg, sample, dirs)
     sample_to_ref = load_sample_ref_map(cfg.path_get("sample_ref_file"))
@@ -2091,7 +2220,15 @@ def record_passes_filter(info: Dict[str, str], mode: str) -> bool:
     if mode == "trna_strict_match":
         return info.get("MTTRNA_STRICT_MATCH") == "yes"
     if mode == "codon_pass":
-        return info.get("MTCODON_STATUS") == "PASS"
+        # Remove only variants that failed codon matching.
+        # Keep coding PASS, noncoding SKIPPED_NONCODING, and records without codon annotation.
+        bad_codon_status = {
+            "MISMATCH",
+            "GENE_MISMATCH",
+            "PHASE_MISMATCH",
+            "NO_HUMAN_CODON",
+        }
+        return info.get("MTCODON_STATUS") not in bad_codon_status
     if mode == "trna_region_match":
         return info.get("MTTRNA_REGION_MATCH") == "yes"
     if mode == "trna_pair_state_match":
@@ -2181,6 +2318,23 @@ def run_sample(cfg: PipeConfig, sample: str) -> None:
         if not current_vcfs:
             current_vcfs = existing_raw_vcfs(cfg, sample, dirs)
         current_vcfs = trna_stage(cfg, sample, current_vcfs, posmap_path, summary_path, dirs)
+        if cfg.setting_bool("run_trna_gene_qc", False):
+            sp_out, sp_ss, _sp_index = species_trna_paths(cfg, sample, dirs)
+            human_out = cfg.path_get("human_trnascan_out")
+            human_ss = cfg.path_get("human_trnascan_ss")
+            qc_path = str(dirs["reports"] / f"{sample}.trna_gene_liftover_qc.tsv")
+            qc_stats = build_trna_gene_liftover_qc(
+                sample, sp_out, sp_ss, human_out, human_ss, posmap_path,
+                load_sample_ref_map(cfg.path_get("sample_ref_file")),
+                load_rotate_info(cfg.path_get("rotate_pos_file")),
+                cfg.setting_int("human_len", 16569),
+                cfg.setting_int("human_restore_offset", 1325),
+                cfg.setting("species_trna_coord_space", "original"),
+                cfg.setting("species_trna_chrom_norm", "none"),
+                cfg.setting("human_trna_chrom_norm", "none"),
+                qc_path,
+            )
+            append_summary(summary_path, qc_stats, "trna_gene_qc")
     if cfg.setting_bool("run_final_filter", False):
         current_vcfs = final_filter_stage(cfg, sample, current_vcfs, summary_path, dirs)
     if cfg.setting_bool("keep_tmp", True) is False:
